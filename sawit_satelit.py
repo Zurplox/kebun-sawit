@@ -105,12 +105,12 @@ function evaluatePixel(s) {
 """
 
 TITLES = {
-    "1_warna_asli_terbaru.png": "Warna Asli — Terbaru",
-    "2_ndvi_terbaru.png": "NDVI (Kesehatan) — Terbaru",
-    "3_warna_asli_bebas_awan.png": "Warna Asli — Bebas Awan",
-    "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
-    "5_ndmi_terbaru.png": "NDMI (Kelembapan) — Bebas Awan",
-    "6_ndre_terbaru.png": "NDRE (Nutrisi) — Bebas Awan",
+    "1_warna_asli_terbaru.png": "Warna Asli \u2014 Terbaru",
+    "2_ndvi_terbaru.png": "NDVI (Kesehatan) \u2014 Terbaru",
+    "3_warna_asli_bebas_awan.png": "Warna Asli \u2014 Bebas Awan",
+    "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) \u2014 Bebas Awan",
+    "5_ndmi_terbaru.png": "NDMI (Kelembapan) \u2014 Bebas Awan",
+    "6_ndre_terbaru.png": "NDRE (Nutrisi) \u2014 Bebas Awan",
 }
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
@@ -150,6 +150,23 @@ def bbox_from_center(lat, lon, half_m):
     dlat = half_m / 111320.0
     dlon = half_m / (111320.0 * math.cos(math.radians(lat)))
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
+
+
+# ---- Kunci koordinat & zoom untuk SEMUA tanggal (anti-geser) ----
+GEO_SIG = "%.6f,%.6f,%.1f" % (LAT, LON, BOX_HALF_M)
+
+
+def geo_ok(folder):
+    try:
+        with open(os.path.join(folder, ".geo"), encoding="utf-8") as f:
+            return f.read().strip() == GEO_SIG
+    except Exception:
+        return False
+
+
+def write_geo(folder):
+    with open(os.path.join(folder, ".geo"), "w", encoding="utf-8") as f:
+        f.write(GEO_SIG)
 
 
 def scene_info(token, days, mode):
@@ -468,7 +485,7 @@ def send_email(paths):
         print("(email dilewati: secret email belum lengkap)")
         return
     msg = EmailMessage()
-    msg["Subject"] = "Citra Satelit Kebun Sawit — " + dt.date.today().isoformat()
+    msg["Subject"] = "Citra Satelit Kebun Sawit \u2014 " + dt.date.today().isoformat()
     msg["From"] = user
     msg["To"] = to
     msg.set_content("Terlampir 4 citra Sentinel-2 plot kebun.\n"
@@ -597,15 +614,17 @@ def main():
     for iso, cc in scenes:
         folder = os.path.join("citra", iso)
         os.makedirs(folder, exist_ok=True)
+        need = not geo_ok(folder)
         imgs = {}
         for name, ev in per_date:
-            p, made = add_layer(iso, name, ev, folder, cc)
+            p, made = add_layer(iso, name, ev, folder, cc, force=need)
             if p:
                 imgs[name] = {"sat": nice_date(iso), "cloud": cc, "rain": rain_for(iso)}
             if made:
                 new_cnt += 1
         if imgs:
             save_meta(folder, iso, imgs)
+            write_geo(folder)
     print("Riwayat: %d gambar baru ditambahkan." % new_cnt)
 
     # 3) SNAPSHOT TERBARU (main day = scene paling baru) + layer bebas-awan & NDMI/NDRE
