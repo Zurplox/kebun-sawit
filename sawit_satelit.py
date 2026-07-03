@@ -97,18 +97,16 @@ def bbox_from_center(lat, lon, half_m):
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
 
-def scene_info(token, days, mosaicking):
-    """Cari tanggal & tutupan awan citra yang dipakai (via Catalog/STAC)."""
+def scene_info(token, days, mode):
+    """Ambil tanggal asli & tutupan awan citra dari Copernicus Catalog (STAC).
+    mode="mostRecent" -> scene terbaru; selain itu -> scene paling sedikit awan."""
     to_d = dt.date.today()
     from_d = to_d - dt.timedelta(days=days)
-    field = "properties.datetime" if mosaicking == "mostRecent" else "properties.eo:cloud_cover"
-    direction = "desc" if mosaicking == "mostRecent" else "asc"
     body = {
         "bbox": bbox_from_center(LAT, LON, BOX_HALF_M),
         "datetime": from_d.isoformat() + "T00:00:00Z/" + to_d.isoformat() + "T23:59:59Z",
         "collections": ["sentinel-2-l2a"],
-        "limit": 1,
-        "sortby": [{"field": field, "direction": direction}],
+        "limit": 100,
     }
     req = urllib.request.Request(
         CATALOG_URL, data=json.dumps(body).encode(),
@@ -117,17 +115,38 @@ def scene_info(token, days, mosaicking):
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             feats = json.load(r).get("features", [])
-        if not feats:
-            return None, None
-        p = feats[0]["properties"]
-        d = p["datetime"][:10]
-        y, m, day = d.split("-")
-        label = "%s %s %s" % (int(day), MONTHS[int(m)], y)
-        cc = p.get("eo:cloud_cover")
-        return label, (round(cc) if cc is not None else None)
     except Exception as e:
-        print("    (catalog gagal: %s)" % e)
+        body_txt = ""
+        try:
+            body_txt = e.read().decode()[:200]
+        except Exception:
+            pass
+        print("    (catalog gagal: %s %s)" % (e, body_txt))
         return None, None
+    if not feats:
+        print("    (catalog: tidak ada scene dalam rentang)")
+        return None, None
+
+    def cc_of(f):
+        v = f.get("properties", {}).get("eo:cloud_cover")
+        return 999.0 if v is None else v
+
+    def dt_of(f):
+        return f.get("properties", {}).get("datetime", "")
+
+    if mode == "mostRecent":
+        f = max(feats, key=dt_of)
+    else:
+        f = min(feats, key=cc_of)
+
+    p = f.get("properties", {})
+    d = (p.get("datetime") or "")[:10]
+    label = None
+    if len(d) == 10 and d.count("-") == 2:
+        y, m, day = d.split("-")
+        label = "%d %s %s" % (int(day), MONTHS[int(m)], y)
+    cc = p.get("eo:cloud_cover")
+    return label, (round(cc) if cc is not None else None)
 
 
 def fetch(token, evalscript, days, mosaicking, out_path, px):
