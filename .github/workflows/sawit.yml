@@ -1,26 +1,26 @@
 name: Citra Sawit Mingguan
-​
+
 on:
   schedule:
     # Setiap Senin 00:00 UTC = Senin 08:00 WIB/Singapore
     - cron: "0 0 */3 * *"
   workflow_dispatch: {}   # tombol jalankan manual
-​
+
 permissions:
   contents: write
-​
+
 jobs:
   ambil-citra:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-​
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-​
+
       - name: Jalankan skrip
         env:
           SH_CLIENT_ID: ${{ secrets.SH_CLIENT_ID }}
@@ -35,7 +35,7 @@ jobs:
           PLOT_LON: "101.96617"
           BOX_HALF_M: "600"
         run: python sawit_satelit.py
-​
+
       - name: Simpan citra ke repo
         run: |
           git config user.name "github-actions[bot]"
@@ -43,4 +43,3 @@ jobs:
           git add -A
           git commit -m "Citra sawit mingguan $(date -u +%Y-%m-%d)" || echo "Tidak ada perubahan"
           git push
-​
