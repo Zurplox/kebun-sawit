@@ -41,6 +41,7 @@ RES_M = 10.0  # resolusi asli Sentinel-2 (band tampak) = 10 meter/piksel
 LATEST_DAYS = 20
 CLOUDFREE_DAYS = 60
 NDVI_ALERT_DROP = 0.08  # penurunan rata-rata NDVI yang dianggap signifikan
+TIMELAPSE_MAX_FRAMES = 120  # animasi pakai maksimal N frame terbaru (folder lama tetap disimpan)
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
@@ -391,6 +392,8 @@ def build_timelapse(ver):
             elif im.size != size:
                 im = im.resize(size, Image.NEAREST)
             frames.append(im)
+        if len(frames) > TIMELAPSE_MAX_FRAMES:
+            frames = frames[-TIMELAPSE_MAX_FRAMES:]
         if len(frames) >= 2:
             gif_path = "timelapse_" + tag + ".gif"
             frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=700, loop=0)
