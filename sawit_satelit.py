@@ -96,13 +96,15 @@ TITLES = {
     "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
     "5_ndmi_terbaru.png": "NDMI (Kelembapan) — Terbaru",
     "6_ndre_terbaru.png": "NDRE (Nutrisi) — Terbaru",
+    "7_resolusi_tinggi.png": "Resolusi Tinggi (Planet ~4.7m) — Bulanan",
 }
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
 LAYER_KEYS = ["1_warna_asli_terbaru.png", "2_ndvi_terbaru.png",
               "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png",
-              "5_ndmi_terbaru.png", "6_ndre_terbaru.png"]
+              "5_ndmi_terbaru.png", "6_ndre_terbaru.png",
+              "7_resolusi_tinggi.png"]
 
 
 def nice_date(iso):
@@ -207,6 +209,71 @@ def rain_mm(iso_date, back_days=10):
         return round(sum(vals))
     except Exception as e:
         print("    (cuaca gagal: %s)" % e)
+        return None
+
+
+def planet_hires(out_path):
+    """Citra resolusi tinggi Planet NICFI (~4.7 m, mozaik bulanan). Perlu PLANET_API_KEY."""
+    key = os.environ.get("PLANET_API_KEY", "").strip()
+    if not key:
+        print("    (planet dilewati: PLANET_API_KEY belum diisi)")
+        return None
+    try:
+        import io as _io
+        z = 15
+        def to_tile(lat, lon):
+            lat_r = math.radians(lat)
+            n = 2 ** z
+            xf = (lon + 180.0) / 360.0 * n
+            yf = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
+            return xf, yf
+        base = "https://tiles.planet.com/basemaps/v1/planet-tiles/"
+        today = dt.date.today()
+        y, mth = today.year, today.month
+        name = None
+        label = None
+        cxf, cyf = to_tile(LAT, LON)
+        for _ in range(6):
+            cand = "planet_medres_visual_%04d-%02d_mosaic" % (y, mth)
+            turl = base + cand + "/gmap/%d/%d/%d.png?api_key=%s" % (z, int(cxf), int(cyf), key)
+            try:
+                with urllib.request.urlopen(turl, timeout=30) as tr:
+                    tr.read(64)
+                name = cand
+                label = "%s %04d" % (MONTHS[mth], y)
+                break
+            except Exception:
+                pass
+            mth -= 1
+            if mth == 0:
+                mth = 12
+                y -= 1
+        if not name:
+            print("    (planet: mozaik terbaru tak ditemukan)")
+            return None
+        minlon, minlat, maxlon, maxlat = bbox_from_center(LAT, LON, BOX_HALF_M)
+        x_tl, y_tl = to_tile(maxlat, minlon)
+        x_br, y_br = to_tile(minlat, maxlon)
+        x0 = int(math.floor(x_tl))
+        x1 = int(math.floor(x_br))
+        y0 = int(math.floor(y_tl))
+        y1 = int(math.floor(y_br))
+        canvas = Image.new("RGB", ((x1 - x0 + 1) * 256, (y1 - y0 + 1) * 256))
+        for xi in range(x0, x1 + 1):
+            for yi in range(y0, y1 + 1):
+                turl = base + name + "/gmap/%d/%d/%d.png?api_key=%s" % (z, xi, yi, key)
+                with urllib.request.urlopen(turl, timeout=60) as tr:
+                    tile = Image.open(_io.BytesIO(tr.read())).convert("RGB")
+                canvas.paste(tile, ((xi - x0) * 256, (yi - y0) * 256))
+        left = int((x_tl - x0) * 256)
+        top = int((y_tl - y0) * 256)
+        right = int((x_br - x0) * 256)
+        bottom = int((y_br - y0) * 256)
+        canvas.crop((left, top, right, bottom)).save(out_path)
+        print("    [ok] planet %s" % label)
+        return label
+    except Exception as e:
+        print("    (planet gagal: %s)" % e)
         return None
 
 
@@ -421,8 +488,16 @@ def main():
             metas[name] = {"sat": date_lbl, "cloud": cc, "rain": rmm}
             print("    [ok] %s (%s | %s)" % (name, cap, proc))
         paths.append(p)
+    ppath = os.path.join(out_dir, "7_resolusi_tinggi.png")
+    plabel = planet_hires(ppath)
+    if plabel:
+        pw = Image.open(ppath).width
+        pfactor = max(2, round(1000 / max(pw, 1)))
+        finalize(ppath, ["Planet " + plabel + " (~4.7m)", "Diproses: " + today_lbl], pfactor)
+        metas["7_resolusi_tinggi.png"] = {"sat": plabel, "cloud": None, "rain": None}
+        paths.append(ppath)
     ok = len([p for p in paths if p])
-    print("Tersimpan %d/4 di %s" % (ok, out_dir))
+    print("Tersimpan %d citra di %s" % (ok, out_dir))
     build_viewer(paths, metas, stamp, ver, out_dir, day)
     try:
         new_sig = "|".join((metas.get(k, {}).get("sat") or "") for k in LAYER_KEYS)
