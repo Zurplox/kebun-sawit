@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SAWIT SATELIT (versi otomatis / GitHub Actions + halaman HP)
-============================================================
-Unduh 4 citra Sentinel-2 plot kebun -> simpan citra/<tanggal>/ + latest/ ->
-buat halaman index.html (bisa dibuka di HP) -> (opsional) kirim email.
-Semua rahasia dibaca dari environment variables (GitHub Secrets).
+SAWIT SATELIT (otomatis / GitHub Actions)
+=========================================
+- Ambil 4 citra Sentinel-2 plot kebun pada resolusi ASLI (10 m/piksel) => detail maksimum.
+- Perbesar tajam (nearest) + cap tanggal pengambilan citra di pojok.
+- Simpan ke citra/<tanggal>/ dan latest/, buat index.html, (opsional) email.
 
 ENV:
   WAJIB : SH_CLIENT_ID, SH_CLIENT_SECRET
-  Lokasi (opsional): PLOT_LAT, PLOT_LON, BOX_HALF_M
-  Email (opsional): MAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+  Lokasi: PLOT_LAT, PLOT_LON, BOX_HALF_M
+  Email : MAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
 """
 
 import datetime as dt
@@ -20,21 +20,30 @@ import os
 import shutil
 import smtplib
 import ssl
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 
+# --- pastikan Pillow tersedia (auto-install di runner) ---
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "pillow"], check=True)
+    from PIL import Image, ImageDraw, ImageFont
+
 LAT = float(os.environ.get("PLOT_LAT", "0.81500"))
 LON = float(os.environ.get("PLOT_LON", "101.96617"))
 BOX_HALF_M = float(os.environ.get("BOX_HALF_M", "600"))
-IMG_PX = int(os.environ.get("IMG_PX", "1024"))
-LATEST_DAYS = 14
-CLOUDFREE_DAYS = 45
+RES_M = 10.0  # resolusi asli Sentinel-2 (band tampak) = 10 meter/piksel
+LATEST_DAYS = 20
+CLOUDFREE_DAYS = 60
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
+CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search"
 
 EVAL_TRUECOLOR = """//VERSION=3
 function setup(){return {input:["B02","B03","B04"],output:{bands:3}};}
@@ -60,17 +69,18 @@ TITLES = {
     "3_warna_asli_bebas_awan.png": "Warna Asli — Bebas Awan",
     "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
 }
+MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+          "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
 
 def get_token():
     cid = os.environ.get("SH_CLIENT_ID", "").strip()
     csec = os.environ.get("SH_CLIENT_SECRET", "").strip()
     if not cid or not csec:
-        sys.exit("[!] SH_CLIENT_ID / SH_CLIENT_SECRET belum di-set (GitHub Secrets).")
+        sys.exit("[!] SH_CLIENT_ID / SH_CLIENT_SECRET belum di-set.")
     data = urllib.parse.urlencode({
         "grant_type": "client_credentials",
-        "client_id": cid,
-        "client_secret": csec,
+        "client_id": cid, "client_secret": csec,
     }).encode()
     req = urllib.request.Request(TOKEN_URL, data=data,
                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -87,7 +97,40 @@ def bbox_from_center(lat, lon, half_m):
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
 
-def fetch(token, evalscript, days, mosaicking, out_path):
+def scene_info(token, days, mosaicking):
+    """Cari tanggal & tutupan awan citra yang dipakai (via Catalog/STAC)."""
+    to_d = dt.date.today()
+    from_d = to_d - dt.timedelta(days=days)
+    field = "properties.datetime" if mosaicking == "mostRecent" else "properties.eo:cloud_cover"
+    direction = "desc" if mosaicking == "mostRecent" else "asc"
+    body = {
+        "bbox": bbox_from_center(LAT, LON, BOX_HALF_M),
+        "datetime": from_d.isoformat() + "T00:00:00Z/" + to_d.isoformat() + "T23:59:59Z",
+        "collections": ["sentinel-2-l2a"],
+        "limit": 1,
+        "sortby": [{"field": field, "direction": direction}],
+    }
+    req = urllib.request.Request(
+        CATALOG_URL, data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + token,
+                 "Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            feats = json.load(r).get("features", [])
+        if not feats:
+            return None, None
+        p = feats[0]["properties"]
+        d = p["datetime"][:10]
+        y, m, day = d.split("-")
+        label = "%s %s %s" % (int(day), MONTHS[int(m)], y)
+        cc = p.get("eo:cloud_cover")
+        return label, (round(cc) if cc is not None else None)
+    except Exception as e:
+        print("    (catalog gagal: %s)" % e)
+        return None, None
+
+
+def fetch(token, evalscript, days, mosaicking, out_path, px):
     to_d = dt.date.today()
     from_d = to_d - dt.timedelta(days=days)
     body = {
@@ -108,7 +151,7 @@ def fetch(token, evalscript, days, mosaicking, out_path):
             }],
         },
         "output": {
-            "width": IMG_PX, "height": IMG_PX,
+            "width": px, "height": px,
             "responses": [{"identifier": "default", "format": {"type": "image/png"}}],
         },
         "evalscript": evalscript,
@@ -125,8 +168,40 @@ def fetch(token, evalscript, days, mosaicking, out_path):
         return None
     with open(out_path, "wb") as f:
         f.write(img)
-    print("    [ok] %s (%d KB)" % (os.path.basename(out_path), len(img) // 1024))
     return out_path
+
+
+def load_font(size):
+    for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def finalize(path, label, factor):
+    """Perbesar tajam (nearest = tanpa blur palsu) + cap tanggal di pojok."""
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    im = im.resize((w * factor, h * factor), Image.NEAREST)
+    W, H = im.size
+    d = ImageDraw.Draw(im)
+    fs = max(16, W // 30)
+    font = load_font(fs)
+    pad = fs // 2
+    try:
+        tw = int(d.textlength(label, font=font))
+    except Exception:
+        tw = fs * len(label) // 2
+    d.rectangle([0, H - fs - 2 * pad, tw + 2 * pad, H], fill=(0, 0, 0))
+    d.text((pad, H - fs - int(pad * 1.2)), label, fill=(255, 255, 255), font=font)
+    im.save(path)
 
 
 def build_viewer(paths, stamp, ver):
@@ -138,17 +213,15 @@ def build_viewer(paths, stamp, ver):
         name = os.path.basename(p)
         shutil.copyfile(p, os.path.join("latest", name))
         title = TITLES.get(name, name)
-        cards += (
-            '<div class="card"><h2>' + title + '</h2>'
-            '<a href="latest/' + name + '?v=' + ver + '" target="_blank">'
-            '<img src="latest/' + name + '?v=' + ver + '" alt="' + title + '"></a></div>\n'
-        )
+        cards += ('<div class="card"><h2>' + title + '</h2>'
+                  '<a href="latest/' + name + '?v=' + ver + '" target="_blank">'
+                  '<img src="latest/' + name + '?v=' + ver + '" alt="' + title + '"></a></div>\n')
     html = HTML_TEMPLATE.replace("__DATE__", stamp).replace("__CARDS__", cards)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
     with open("manifest.json", "w", encoding="utf-8") as f:
         f.write(MANIFEST)
-    print("Halaman index.html diperbarui.")
+    print("index.html diperbarui.")
 
 
 def send_email(paths):
@@ -164,9 +237,8 @@ def send_email(paths):
     msg["Subject"] = "Citra Satelit Kebun Sawit — " + dt.date.today().isoformat()
     msg["From"] = user
     msg["To"] = to
-    msg.set_content(
-        "Terlampir 4 citra Sentinel-2 plot kebun minggu ini.\n"
-        "NDVI: hijau tua = sehat, kuning = lemah, merah = stres/gundul.")
+    msg.set_content("Terlampir 4 citra Sentinel-2 plot kebun.\n"
+                    "NDVI: hijau tua = sehat, kuning = lemah, merah = stres/gundul.")
     for p in paths:
         if not p:
             continue
@@ -188,7 +260,12 @@ def main():
     day = dt.date.today().isoformat()
     out_dir = os.path.join("citra", day)
     os.makedirs(out_dir, exist_ok=True)
-    print("Plot %.5f, %.5f | area ~%.1f km" % (LAT, LON, BOX_HALF_M * 2 / 1000.0))
+
+    native_px = max(48, round(2 * BOX_HALF_M / RES_M))  # resolusi asli 10 m
+    factor = max(4, round(1000 / native_px))            # perbesar tajam utk dilihat
+    print("Plot %.5f, %.5f | area ~%.2f km | native %dpx x%d" %
+          (LAT, LON, BOX_HALF_M * 2 / 1000.0, native_px, factor))
+
     token = get_token()
     jobs = [
         ("1_warna_asli_terbaru.png",    EVAL_TRUECOLOR, LATEST_DAYS,    "mostRecent"),
@@ -199,7 +276,15 @@ def main():
     paths = []
     for name, ev, days, mos in jobs:
         print("  -> " + name)
-        paths.append(fetch(token, ev, days, mos, os.path.join(out_dir, name)))
+        date_lbl, cc = scene_info(token, days, mos)
+        p = fetch(token, ev, days, mos, os.path.join(out_dir, name), native_px)
+        if p:
+            tag = "S2 · " + (date_lbl or day)
+            if cc is not None:
+                tag += " · awan %d%%" % cc
+            finalize(p, tag, factor)
+            print("    [ok] %s (%s)" % (name, tag))
+        paths.append(p)
     ok = len([p for p in paths if p])
     print("Tersimpan %d/4 di %s" % (ok, out_dir))
     build_viewer(paths, stamp, ver)
@@ -218,14 +303,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1b5e20">
 <style>
-* { box-sizing: border-box; }
+* { box-sizing:border-box; }
 body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:#0f2417; color:#eaf5ea; }
 header { padding:16px; text-align:center; background:#1b5e20; position:sticky; top:0; z-index:5; }
 header h1 { margin:0; font-size:17px; }
 header p { margin:5px 0 0; font-size:13px; opacity:.85; }
 .card { margin:14px; background:#15321f; border-radius:14px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.35); }
 .card h2 { font-size:15px; margin:0; padding:12px 14px 8px; }
-.card img { width:100%; display:block; }
+.card img { width:100%; display:block; image-rendering:pixelated; }
 .legend { margin:14px; padding:14px; background:#15321f; border-radius:14px; font-size:13px; line-height:1.8; }
 .sw { display:inline-block; width:13px; height:13px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
