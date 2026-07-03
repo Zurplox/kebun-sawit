@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SAWIT SATELIT (versi otomatis / GitHub Actions)
-===============================================
-Unduh 4 citra Sentinel-2 plot kebun -> simpan ke folder citra/ -> (opsional) email.
-Semua rahasia dibaca dari environment variables (GitHub Secrets), TIDAK ditulis di file.
+SAWIT SATELIT (versi otomatis / GitHub Actions + halaman HP)
+============================================================
+Unduh 4 citra Sentinel-2 plot kebun -> simpan citra/<tanggal>/ + latest/ ->
+buat halaman index.html (bisa dibuka di HP) -> (opsional) kirim email.
+Semua rahasia dibaca dari environment variables (GitHub Secrets).
 
-ENV yang dibaca:
+ENV:
   WAJIB : SH_CLIENT_ID, SH_CLIENT_SECRET
-  Lokasi (opsional, ada default): PLOT_LAT, PLOT_LON, BOX_HALF_M
+  Lokasi (opsional): PLOT_LAT, PLOT_LON, BOX_HALF_M
   Email (opsional): MAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
 """
 
@@ -16,6 +17,7 @@ import datetime as dt
 import json
 import math
 import os
+import shutil
 import smtplib
 import ssl
 import sys
@@ -24,7 +26,6 @@ import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 
-# --------- Lokasi plot (default = plot HS, Rawang Air Putih) ---------
 LAT = float(os.environ.get("PLOT_LAT", "0.81500"))
 LON = float(os.environ.get("PLOT_LON", "101.96617"))
 BOX_HALF_M = float(os.environ.get("BOX_HALF_M", "600"))
@@ -52,6 +53,13 @@ function evaluatePixel(s){
   else              return [0.00,0.35,0.05];
 }
 """
+
+TITLES = {
+    "1_warna_asli_terbaru.png": "Warna Asli — Terbaru",
+    "2_ndvi_terbaru.png": "NDVI (Kesehatan) — Terbaru",
+    "3_warna_asli_bebas_awan.png": "Warna Asli — Bebas Awan",
+    "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
+}
 
 
 def get_token():
@@ -121,6 +129,28 @@ def fetch(token, evalscript, days, mosaicking, out_path):
     return out_path
 
 
+def build_viewer(paths, stamp, ver):
+    os.makedirs("latest", exist_ok=True)
+    cards = ""
+    for p in paths:
+        if not p:
+            continue
+        name = os.path.basename(p)
+        shutil.copyfile(p, os.path.join("latest", name))
+        title = TITLES.get(name, name)
+        cards += (
+            '<div class="card"><h2>' + title + '</h2>'
+            '<a href="latest/' + name + '?v=' + ver + '" target="_blank">'
+            '<img src="latest/' + name + '?v=' + ver + '" alt="' + title + '"></a></div>\n'
+        )
+    html = HTML_TEMPLATE.replace("__DATE__", stamp).replace("__CARDS__", cards)
+    with open("index.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    with open("manifest.json", "w", encoding="utf-8") as f:
+        f.write(MANIFEST)
+    print("Halaman index.html diperbarui.")
+
+
 def send_email(paths):
     to = os.environ.get("MAIL_TO", "").strip()
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
@@ -128,17 +158,15 @@ def send_email(paths):
     user = os.environ.get("SMTP_USER", "").strip()
     pw = os.environ.get("SMTP_PASS", "").strip()
     if not (to and user and pw):
-        print("(email dilewati: MAIL_TO/SMTP_USER/SMTP_PASS belum lengkap)")
+        print("(email dilewati: secret email belum lengkap)")
         return
     msg = EmailMessage()
     msg["Subject"] = "Citra Satelit Kebun Sawit — " + dt.date.today().isoformat()
     msg["From"] = user
     msg["To"] = to
     msg.set_content(
-        "Terlampir 4 citra Sentinel-2 plot kebun minggu ini:\n"
-        "1. Warna asli (terbaru)\n2. NDVI (terbaru)\n"
-        "3. Warna asli (bebas awan)\n4. NDVI (bebas awan)\n\n"
-        "NDVI: hijau tua = sehat/rimbun, kuning = lemah, merah = stres/gundul.")
+        "Terlampir 4 citra Sentinel-2 plot kebun minggu ini.\n"
+        "NDVI: hijau tua = sehat, kuning = lemah, merah = stres/gundul.")
     for p in paths:
         if not p:
             continue
@@ -154,8 +182,11 @@ def send_email(paths):
 
 
 def main():
-    stamp = dt.date.today().isoformat()
-    out_dir = os.path.join("citra", stamp)
+    now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)
+    stamp = now.strftime("%d %b %Y, %H:%M WIB")
+    ver = now.strftime("%Y%m%d%H%M")
+    day = dt.date.today().isoformat()
+    out_dir = os.path.join("citra", day)
     os.makedirs(out_dir, exist_ok=True)
     print("Plot %.5f, %.5f | area ~%.1f km" % (LAT, LON, BOX_HALF_M * 2 / 1000.0))
     token = get_token()
@@ -171,10 +202,55 @@ def main():
         paths.append(fetch(token, ev, days, mos, os.path.join(out_dir, name)))
     ok = len([p for p in paths if p])
     print("Tersimpan %d/4 di %s" % (ok, out_dir))
+    build_viewer(paths, stamp, ver)
     try:
         send_email(paths)
     except Exception as e:
         print("(email gagal: %s)" % e)
+
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Citra Kebun Sawit</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1b5e20">
+<style>
+* { box-sizing: border-box; }
+body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:#0f2417; color:#eaf5ea; }
+header { padding:16px; text-align:center; background:#1b5e20; position:sticky; top:0; z-index:5; }
+header h1 { margin:0; font-size:17px; }
+header p { margin:5px 0 0; font-size:13px; opacity:.85; }
+.card { margin:14px; background:#15321f; border-radius:14px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.35); }
+.card h2 { font-size:15px; margin:0; padding:12px 14px 8px; }
+.card img { width:100%; display:block; }
+.legend { margin:14px; padding:14px; background:#15321f; border-radius:14px; font-size:13px; line-height:1.8; }
+.sw { display:inline-block; width:13px; height:13px; border-radius:3px; margin-right:7px; vertical-align:middle; }
+footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
+</style>
+</head>
+<body>
+<header>
+<h1>🛰️ Kebun Sawit — Rawang Air Putih</h1>
+<p>Diperbarui: __DATE__</p>
+</header>
+__CARDS__
+<div class="legend">
+<b>Cara baca NDVI:</b><br>
+<span class="sw" style="background:#00591a"></span> Hijau tua — rimbun / sehat<br>
+<span class="sw" style="background:#4caf50"></span> Hijau muda — sedang<br>
+<span class="sw" style="background:#f2c032"></span> Kuning — lemah<br>
+<span class="sw" style="background:#d93521"></span> Merah — stres / gundul<br>
+<span class="sw" style="background:#bfbfbf"></span> Abu — air / tanah basah
+</div>
+<footer>Otomatis dari Sentinel-2 · Copernicus · tap gambar untuk perbesar</footer>
+</body>
+</html>
+"""
+
+MANIFEST = '{"name":"Kebun Sawit","short_name":"Sawit","start_url":".","display":"standalone","background_color":"#0f2417","theme_color":"#1b5e20","icons":[]}'
 
 
 if __name__ == "__main__":
