@@ -30,6 +30,10 @@ nav button.active { color:#fff; border-bottom-color:#7ed957; font-weight:600; }
 .legend { margin:14px; padding:14px; background:#15321f; border-radius:14px; font-size:13px; line-height:1.8; }
 .sw { display:inline-block; width:13px; height:13px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
+#alertbar { margin:0; padding:12px 16px; background:#7a1e1e; color:#fff; font-size:13px; font-weight:600; }
+#alertbar.ok { background:#1b5e20; }
+#anim-view { margin:14px; }
+#anim-view .card { margin:0 0 14px; }
 </style>
 </head>
 <body>
@@ -37,10 +41,12 @@ footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
 <h1>🛰️ Kebun Sawit — Rawang Air Putih</h1>
 <p><span id="plot"></span> · diperbarui: <span id="updated"></span></p>
 </header>
+<div id="alertbar" hidden></div>
 <nav>
 <button id="btn-latest" class="active">Terbaru</button>
 <button id="btn-history">Riwayat</button>
 <button id="btn-compare">Banding</button>
+<button id="btn-anim">Animasi</button>
 </nav>
 <main>
 <section id="tab-latest"><div id="latest-cards"></div></section>
@@ -58,6 +64,9 @@ footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
 <select id="c-date-b"></select>
 </div>
 <div class="compare"><div id="c-a"></div><div id="c-b"></div></div>
+</section>
+<section id="tab-anim" hidden>
+<div id="anim-view"></div>
 </section>
 </main>
 <div class="legend">
@@ -91,7 +100,7 @@ function imgLink(snap,key){
   a.appendChild(im); return a;
 }
 function showTab(name){
-  ['latest','history','compare'].forEach(function(t){
+  ['latest','history','compare','anim'].forEach(function(t){
     q('#tab-'+t).hidden = (t !== name);
     q('#btn-'+t).classList.toggle('active', t === name);
   });
@@ -143,14 +152,39 @@ function fillControls(){
   if(DATA.snapshots.length > 1){ q('#c-date-a').selectedIndex = 1; }
   q('#c-date-b').selectedIndex = 0;
 }
+function renderAnim(){
+  var box = q("#anim-view"); box.innerHTML = "";
+  var tl = DATA.timelapse;
+  if(!tl){ box.textContent = "Timelapse akan muncul setelah ada beberapa tanggal."; return; }
+  var items = [["warna","Warna Asli"],["ndvi","NDVI (Kesehatan)"]];
+  items.forEach(function(it){
+    if(!tl[it[0]]){ return; }
+    var card = document.createElement("div"); card.className = "card";
+    var h = document.createElement("h2"); h.textContent = "Animasi " + it[1]; card.appendChild(h);
+    var im = document.createElement("img"); im.src = tl[it[0]]; card.appendChild(im);
+    box.appendChild(card);
+  });
+}
+function renderHealth(){
+  var bar = q("#alertbar"); var h = DATA.health;
+  if(!h){ bar.hidden = true; return; }
+  if(h.alert){
+    bar.hidden = false; bar.className = "";
+    bar.textContent = "⚠️ NDVI turun " + h.alert.drop + " (" + h.alert.from + " → " + h.alert.to + ") sejak " + h.alert.since;
+  } else if(h.current != null){
+    bar.hidden = false; bar.className = "ok";
+    bar.textContent = "✅ NDVI rata-rata plot: " + h.current + " (stabil)";
+  } else { bar.hidden = true; }
+}
 function init(){
   q('#updated').textContent = DATA.updated || '';
   q('#plot').textContent = DATA.plot || '';
   fillControls();
-  renderLatest(); renderHistory(); renderCompare();
+  renderLatest(); renderHistory(); renderCompare(); renderAnim(); renderHealth();
   q('#btn-latest').onclick = function(){ showTab('latest'); };
   q('#btn-history').onclick = function(){ showTab('history'); };
   q('#btn-compare').onclick = function(){ showTab('compare'); };
+  q('#btn-anim').onclick = function(){ showTab('anim'); };
   q('#h-layer').onchange = renderHistory; q('#h-date').onchange = renderHistory;
   q('#c-layer').onchange = renderCompare;
   q('#c-date-a').onchange = renderCompare; q('#c-date-b').onchange = renderCompare;
