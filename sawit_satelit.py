@@ -40,6 +40,7 @@ BOX_HALF_M = float(os.environ.get("BOX_HALF_M", "600"))
 RES_M = 10.0  # resolusi asli Sentinel-2 (band tampak) = 10 meter/piksel
 LATEST_DAYS = 20
 CLOUDFREE_DAYS = 60
+NDVI_ALERT_DROP = 0.08  # penurunan rata-rata NDVI yang dianggap signifikan
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
@@ -89,22 +90,33 @@ function evaluatePixel(s) {
 }
 """
 
+EVAL_NDVI_RAW = """//VERSION=3
+function setup() { return { input: ["B04", "B08", "SCL", "dataMask"], output: { bands: 2, sampleType: "UINT8" } }; }
+function evaluatePixel(s) {
+  var ndvi = (s.B08 - s.B04) / (s.B08 + s.B04 + 1e-6);
+  var v = Math.round((ndvi * 0.5 + 0.5) * 255);
+  if (v < 0) { v = 0; }
+  if (v > 255) { v = 255; }
+  var bad = (s.SCL == 3 || s.SCL == 8 || s.SCL == 9 || s.SCL == 10 || s.SCL == 11);
+  var valid = (s.dataMask == 1 && !bad) ? 255 : 0;
+  return [v, valid];
+}
+"""
+
 TITLES = {
     "1_warna_asli_terbaru.png": "Warna Asli — Terbaru",
     "2_ndvi_terbaru.png": "NDVI (Kesehatan) — Terbaru",
     "3_warna_asli_bebas_awan.png": "Warna Asli — Bebas Awan",
     "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
-    "5_ndmi_terbaru.png": "NDMI (Kelembapan) — Terbaru",
-    "6_ndre_terbaru.png": "NDRE (Nutrisi) — Terbaru",
-    "7_resolusi_tinggi.png": "Resolusi Tinggi (Planet ~4.7m) — Bulanan",
+    "5_ndmi_terbaru.png": "NDMI (Kelembapan) — Bebas Awan",
+    "6_ndre_terbaru.png": "NDRE (Nutrisi) — Bebas Awan",
 }
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
 LAYER_KEYS = ["1_warna_asli_terbaru.png", "2_ndvi_terbaru.png",
               "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png",
-              "5_ndmi_terbaru.png", "6_ndre_terbaru.png",
-              "7_resolusi_tinggi.png"]
+              "5_ndmi_terbaru.png", "6_ndre_terbaru.png"]
 
 
 def nice_date(iso):
@@ -212,74 +224,15 @@ def rain_mm(iso_date, back_days=10):
         return None
 
 
-def planet_hires(out_path):
-    """Citra resolusi tinggi Planet NICFI (~4.7 m, mozaik bulanan). Perlu PLANET_API_KEY."""
-    key = os.environ.get("PLANET_API_KEY", "").strip()
-    if not key:
-        print("    (planet dilewati: PLANET_API_KEY belum diisi)")
-        return None
-    try:
-        import io as _io
-        z = 15
-        def to_tile(lat, lon):
-            lat_r = math.radians(lat)
-            n = 2 ** z
-            xf = (lon + 180.0) / 360.0 * n
-            yf = (1.0 - math.log(math.tan(lat_r) + 1.0 / math.cos(lat_r)) / math.pi) / 2.0 * n
-            return xf, yf
-        base = "https://tiles.planet.com/basemaps/v1/planet-tiles/"
-        today = dt.date.today()
-        y, mth = today.year, today.month
-        name = None
-        label = None
-        cxf, cyf = to_tile(LAT, LON)
-        for _ in range(6):
-            cand = "planet_medres_visual_%04d-%02d_mosaic" % (y, mth)
-            turl = base + cand + "/gmap/%d/%d/%d.png?api_key=%s" % (z, int(cxf), int(cyf), key)
-            try:
-                with urllib.request.urlopen(turl, timeout=30) as tr:
-                    tr.read(64)
-                name = cand
-                label = "%s %04d" % (MONTHS[mth], y)
-                break
-            except Exception:
-                pass
-            mth -= 1
-            if mth == 0:
-                mth = 12
-                y -= 1
-        if not name:
-            print("    (planet: mozaik terbaru tak ditemukan)")
-            return None
-        minlon, minlat, maxlon, maxlat = bbox_from_center(LAT, LON, BOX_HALF_M)
-        x_tl, y_tl = to_tile(maxlat, minlon)
-        x_br, y_br = to_tile(minlat, maxlon)
-        x0 = int(math.floor(x_tl))
-        x1 = int(math.floor(x_br))
-        y0 = int(math.floor(y_tl))
-        y1 = int(math.floor(y_br))
-        canvas = Image.new("RGB", ((x1 - x0 + 1) * 256, (y1 - y0 + 1) * 256))
-        for xi in range(x0, x1 + 1):
-            for yi in range(y0, y1 + 1):
-                turl = base + name + "/gmap/%d/%d/%d.png?api_key=%s" % (z, xi, yi, key)
-                with urllib.request.urlopen(turl, timeout=60) as tr:
-                    tile = Image.open(_io.BytesIO(tr.read())).convert("RGB")
-                canvas.paste(tile, ((xi - x0) * 256, (yi - y0) * 256))
-        left = int((x_tl - x0) * 256)
-        top = int((y_tl - y0) * 256)
-        right = int((x_br - x0) * 256)
-        bottom = int((y_br - y0) * 256)
-        canvas.crop((left, top, right, bottom)).save(out_path)
-        print("    [ok] planet %s" % label)
-        return label
-    except Exception as e:
-        print("    (planet gagal: %s)" % e)
-        return None
-
-
-def fetch(token, evalscript, days, mosaicking, out_path, px):
+def fetch(token, evalscript, days, mosaicking, out_path, px, pin_iso=None):
     to_d = dt.date.today()
     from_d = to_d - dt.timedelta(days=days)
+    if pin_iso and len(pin_iso) == 10:
+        t_from = pin_iso + "T00:00:00Z"
+        t_to = pin_iso + "T23:59:59Z"
+    else:
+        t_from = from_d.isoformat() + "T00:00:00Z"
+        t_to = to_d.isoformat() + "T23:59:59Z"
     body = {
         "input": {
             "bounds": {
@@ -290,8 +243,8 @@ def fetch(token, evalscript, days, mosaicking, out_path, px):
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {
-                        "from": from_d.isoformat() + "T00:00:00Z",
-                        "to": to_d.isoformat() + "T23:59:59Z",
+                        "from": t_from,
+                        "to": t_to,
                     },
                     "mosaickingOrder": mosaicking,
                 },
@@ -360,7 +313,93 @@ def finalize(path, lines, factor):
     im.save(path)
 
 
-def build_viewer(paths, metas, stamp, ver, out_dir, day):
+def ndvi_average(token, pin_iso=None):
+    """Rata-rata NDVI seluruh plot dari scene tertentu (default terbaru); piksel awan/nodata dibuang."""
+    px = max(48, round(2 * BOX_HALF_M / RES_M))
+    tmp = os.path.join("citra", ".ndvi_raw.png")
+    p = fetch(token, EVAL_NDVI_RAW, LATEST_DAYS, "mostRecent", tmp, px, pin_iso)
+    if not p:
+        return None
+    try:
+        im = Image.open(p).convert("LA")
+        tot = 0.0
+        cnt = 0
+        for v, mk in im.getdata():
+            if mk >= 128:
+                tot += (v / 255.0 - 0.5) * 2.0
+                cnt += 1
+        if cnt < 10:
+            return None
+        return round(tot / cnt, 3)
+    except Exception as e:
+        print("    (ndvi avg gagal: %s)" % e)
+        return None
+    finally:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+
+
+def update_health(day, current):
+    """Simpan riwayat NDVI harian & deteksi penurunan vs rata-rata 3 data terakhir."""
+    hist_path = "ndvi_history.json"
+    hist = []
+    if os.path.exists(hist_path):
+        try:
+            hist = json.load(open(hist_path, encoding="utf-8"))
+        except Exception:
+            hist = []
+    hist = [h for h in hist if h.get("date") != day]
+    prev = sorted(hist, key=lambda h: h.get("date", ""))
+    hist.append(dict(date=day, ndvi=current))
+    hist.sort(key=lambda h: h.get("date", ""))
+    with open(hist_path, "w", encoding="utf-8") as f:
+        json.dump(hist, f, ensure_ascii=False)
+    alert = None
+    refs = [h["ndvi"] for h in prev[-3:] if h.get("ndvi") is not None]
+    if refs:
+        ref = sum(refs) / len(refs)
+        drop = ref - current
+        if drop >= NDVI_ALERT_DROP:
+            alert = dict(drop=round(drop, 3), from_=round(ref, 3), to=current, since=prev[-1].get("date"))
+            alert["from"] = alert.pop("from_")
+    series = [dict(date=h["date"], ndvi=h["ndvi"]) for h in hist[-12:]]
+    return dict(current=current, series=series, alert=alert)
+
+
+def build_timelapse(ver):
+    """Buat GIF timelapse dari semua snapshot (warna asli & NDVI)."""
+    base = "citra"
+    if not os.path.isdir(base):
+        return None
+    dates = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
+    out = dict()
+    for key, tag in (("1_warna_asli_terbaru.png", "warna"), ("2_ndvi_terbaru.png", "ndvi")):
+        frames = []
+        size = None
+        for d in dates:
+            fp = os.path.join(base, d, key)
+            if not os.path.exists(fp):
+                continue
+            try:
+                im = Image.open(fp).convert("RGB")
+            except Exception:
+                continue
+            if size is None:
+                size = im.size
+            elif im.size != size:
+                im = im.resize(size, Image.NEAREST)
+            frames.append(im)
+        if len(frames) >= 2:
+            gif_path = "timelapse_" + tag + ".gif"
+            frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=700, loop=0)
+            out[tag] = gif_path + "?v=" + ver
+            print("    [ok] timelapse %s (%d frame)" % (tag, len(frames)))
+    return out if out else None
+
+
+def build_viewer(paths, metas, stamp, ver, out_dir, day, health=None, timelapse=None):
     os.makedirs("latest", exist_ok=True)
     for p in paths:
         if p:
@@ -399,6 +438,10 @@ def build_viewer(paths, metas, stamp, ver, out_dir, day):
         "layers": [{"key": k, "title": TITLES[k]} for k in LAYER_KEYS],
         "snapshots": snaps,
     }
+    if health:
+        data["health"] = health
+    if timelapse:
+        data["timelapse"] = timelapse
     with open("data.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     with open("index.html", "w", encoding="utf-8") as f:
@@ -441,78 +484,175 @@ def send_email(paths):
     print("Email terkirim ke %s" % to)
 
 
+def list_scenes(token, days):
+    """Semua tanggal akuisisi Sentinel-2 dalam N hari terakhir (dedup, awan minimum per tanggal)."""
+    to_d = dt.date.today()
+    from_d = to_d - dt.timedelta(days=days)
+    body = {
+        "bbox": bbox_from_center(LAT, LON, BOX_HALF_M),
+        "datetime": from_d.isoformat() + "T00:00:00Z/" + to_d.isoformat() + "T23:59:59Z",
+        "collections": ["sentinel-2-l2a"],
+        "limit": 100,
+    }
+    req = urllib.request.Request(
+        CATALOG_URL, data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + token,
+                 "Content-Type": "application/json",
+                 "Accept": "application/geo+json, application/json, */*"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            feats = json.load(r).get("features", [])
+    except Exception as e:
+        print("    (catalog gagal: %s)" % e)
+        return []
+    best = {}
+    for f in feats:
+        p = f.get("properties", {})
+        d = (p.get("datetime") or "")[:10]
+        if len(d) != 10 or d.count("-") != 2:
+            continue
+        cc = p.get("eo:cloud_cover")
+        ccv = 999.0 if cc is None else cc
+        if d not in best or ccv < best[d]:
+            best[d] = ccv
+    out = []
+    for d in sorted(best):
+        cc = best[d]
+        out.append((d, (None if cc >= 999.0 else round(cc))))
+    return out
+
+
 def main():
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)
     stamp = now.strftime("%d %b %Y, %H:%M WIB")
     today_lbl = "%d %s %d" % (now.day, MONTHS[now.month], now.year)
     ver = now.strftime("%Y%m%d%H%M")
-    day = dt.date.today().isoformat()
-    out_dir = os.path.join("citra", day)
-    os.makedirs(out_dir, exist_ok=True)
 
-    native_px = max(48, round(2 * BOX_HALF_M / RES_M))  # resolusi asli 10 m
-    factor = max(4, round(1000 / native_px))            # perbesar tajam utk dilihat
+    native_px = max(48, round(2 * BOX_HALF_M / RES_M))
+    factor = max(4, round(1000 / native_px))
     print("Plot %.5f, %.5f | area ~%.2f km | native %dpx x%d" %
           (LAT, LON, BOX_HALF_M * 2 / 1000.0, native_px, factor))
 
     token = get_token()
-    jobs = [
-        ("1_warna_asli_terbaru.png",    EVAL_TRUECOLOR, LATEST_DAYS,    "mostRecent"),
-        ("2_ndvi_terbaru.png",          EVAL_NDVI,      LATEST_DAYS,    "mostRecent"),
-        ("3_warna_asli_bebas_awan.png", EVAL_TRUECOLOR, CLOUDFREE_DAYS, "leastCC"),
-        ("4_ndvi_bebas_awan.png",       EVAL_NDVI,      CLOUDFREE_DAYS, "leastCC"),
-        ("5_ndmi_terbaru.png",          EVAL_NDMI,      LATEST_DAYS,    "mostRecent"),
-        ("6_ndre_terbaru.png",          EVAL_NDRE,      LATEST_DAYS,    "mostRecent"),
-    ]
-    paths = []
-    metas = {}
+    os.makedirs("citra", exist_ok=True)
     rain_cache = {}
-    for name, ev, days, mos in jobs:
-        print("  -> " + name)
-        date_lbl, cc, iso = scene_info(token, days, mos)
-        p = fetch(token, ev, days, mos, os.path.join(out_dir, name), native_px)
+
+    def rain_for(iso):
+        if not iso:
+            return None
+        if iso not in rain_cache:
+            rain_cache[iso] = rain_mm(iso)
+        return rain_cache[iso]
+
+    def add_layer(iso, name, evalscript, folder, cc, force=False):
+        out_path = os.path.join(folder, name)
+        if os.path.exists(out_path) and not force:
+            return out_path, False
+        p = fetch(token, evalscript, LATEST_DAYS, "mostRecent", out_path, native_px, iso)
+        if not p:
+            return None, False
+        rmm = rain_for(iso)
+        cap = "Satelit: " + nice_date(iso)
+        if cc is not None:
+            cap += " (awan %d%%)" % cc
+        lines = []
+        if rmm is not None:
+            lines.append("Hujan 10hr: %d mm" % rmm)
+        lines.append(cap)
+        lines.append("Diproses: " + today_lbl)
+        finalize(p, lines, factor)
+        return p, True
+
+    def save_meta(folder, day_iso, images):
+        mp = os.path.join(folder, "meta.json")
+        obj = {"date": day_iso, "images": {}}
+        if os.path.exists(mp):
+            try:
+                obj = json.load(open(mp, encoding="utf-8"))
+                obj.setdefault("images", {})
+            except Exception:
+                obj = {"date": day_iso, "images": {}}
+        obj["date"] = day_iso
+        obj["stamp"] = stamp
+        obj["images"].update(images)
+        with open(mp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+
+    # 1) Daftar semua scene 60 hari terakhir
+    scenes = list_scenes(token, CLOUDFREE_DAYS)
+    if not scenes:
+        print("[!] Tidak ada scene dalam 60 hari terakhir; berhenti.")
+        return
+    mr_iso, mr_cc = scenes[-1]
+    print("Scene 60 hari: %d tanggal | terbaru %s (awan %s)" %
+          (len(scenes), mr_iso, "?" if mr_cc is None else str(mr_cc) + "%"))
+
+    # 2) BACKFILL riwayat per tanggal (warna asli + NDVI); lewati yg sudah ada -> hanya isi tanggal baru
+    per_date = [("1_warna_asli_terbaru.png", EVAL_TRUECOLOR),
+                ("2_ndvi_terbaru.png", EVAL_NDVI)]
+    new_cnt = 0
+    for iso, cc in scenes:
+        folder = os.path.join("citra", iso)
+        os.makedirs(folder, exist_ok=True)
+        imgs = {}
+        for name, ev in per_date:
+            p, made = add_layer(iso, name, ev, folder, cc)
+            if p:
+                imgs[name] = {"sat": nice_date(iso), "cloud": cc, "rain": rain_for(iso)}
+            if made:
+                new_cnt += 1
+        if imgs:
+            save_meta(folder, iso, imgs)
+    print("Riwayat: %d gambar baru ditambahkan." % new_cnt)
+
+    # 3) SNAPSHOT TERBARU (main day = scene paling baru) + layer bebas-awan & NDMI/NDRE
+    mr_folder = os.path.join("citra", mr_iso)
+    cf_label, cf_cc, cf_iso = scene_info(token, CLOUDFREE_DAYS, "leastCC")
+    paths = []
+    metas_latest = {}
+    for name in ("1_warna_asli_terbaru.png", "2_ndvi_terbaru.png"):
+        fp = os.path.join(mr_folder, name)
+        if os.path.exists(fp):
+            paths.append(fp)
+            metas_latest[name] = {"sat": nice_date(mr_iso), "cloud": mr_cc, "rain": rain_for(mr_iso)}
+    analysis = [("3_warna_asli_bebas_awan.png", EVAL_TRUECOLOR),
+                ("4_ndvi_bebas_awan.png", EVAL_NDVI),
+                ("5_ndmi_terbaru.png", EVAL_NDMI),
+                ("6_ndre_terbaru.png", EVAL_NDRE)]
+    for name, ev in analysis:
+        out_path = os.path.join(mr_folder, name)
+        p = fetch(token, ev, CLOUDFREE_DAYS, "leastCC", out_path, native_px, cf_iso)
         if p:
-            cap = "Satelit: " + (date_lbl or "?")
-            if cc is not None:
-                cap += " (awan %d%%)" % cc
-            proc = "Diproses: " + today_lbl
-            if iso not in rain_cache:
-                rain_cache[iso] = rain_mm(iso)
-            rmm = rain_cache[iso]
+            rmm = rain_for(cf_iso)
+            cap = "Satelit: " + (cf_label or "?")
+            if cf_cc is not None:
+                cap += " (awan %d%%)" % cf_cc
             lines = []
             if rmm is not None:
                 lines.append("Hujan 10hr: %d mm" % rmm)
             lines.append(cap)
-            lines.append(proc)
+            lines.append("Diproses: " + today_lbl)
             finalize(p, lines, factor)
-            metas[name] = {"sat": date_lbl, "cloud": cc, "rain": rmm}
-            print("    [ok] %s (%s | %s)" % (name, cap, proc))
-        paths.append(p)
-    ppath = os.path.join(out_dir, "7_resolusi_tinggi.png")
-    plabel = planet_hires(ppath)
-    if plabel:
-        pw = Image.open(ppath).width
-        pfactor = max(2, round(1000 / max(pw, 1)))
-        finalize(ppath, ["Planet " + plabel + " (~4.7m)", "Diproses: " + today_lbl], pfactor)
-        metas["7_resolusi_tinggi.png"] = {"sat": plabel, "cloud": None, "rain": None}
-        paths.append(ppath)
-    ok = len([p for p in paths if p])
-    print("Tersimpan %d citra di %s" % (ok, out_dir))
-    build_viewer(paths, metas, stamp, ver, out_dir, day)
+            metas_latest[name] = {"sat": cf_label, "cloud": cf_cc, "rain": rmm}
+            paths.append(p)
+    save_meta(mr_folder, mr_iso, metas_latest)
+
+    # 4) Kesehatan (NDVI rata-rata scene terbaru) + timelapse + dashboard
+    health = None
     try:
-        new_sig = "|".join((metas.get(k, {}).get("sat") or "") for k in LAYER_KEYS)
-        sig_path = ".last_email.txt"
-        prev_sig = ""
-        if os.path.exists(sig_path):
-            prev_sig = open(sig_path, encoding="utf-8").read().strip()
-        if new_sig and new_sig != prev_sig:
-            send_email(paths)
-            with open(sig_path, "w", encoding="utf-8") as f:
-                f.write(new_sig)
-        else:
-            print("(email dilewati: tidak ada citra baru sejak email terakhir)")
+        cur = ndvi_average(token, mr_iso)
+        if cur is not None:
+            health = update_health(mr_iso, cur)
+            print("  Kesehatan: NDVI rata-rata %.3f" % cur)
     except Exception as e:
-        print("(email gagal: %s)" % e)
+        print("(kesehatan gagal: %s)" % e)
+    timelapse = None
+    try:
+        timelapse = build_timelapse(ver)
+    except Exception as e:
+        print("(timelapse gagal: %s)" % e)
+    build_viewer(paths, metas_latest, stamp, ver, mr_folder, mr_iso, health, timelapse)
+    print("Selesai.")
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -547,6 +687,10 @@ nav button.active { color:#fff; border-bottom-color:#7ed957; font-weight:600; }
 .legend { margin:14px; padding:14px; background:#15321f; border-radius:14px; font-size:13px; line-height:1.8; }
 .sw { display:inline-block; width:13px; height:13px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
+#alertbar { margin:0; padding:12px 16px; background:#7a1e1e; color:#fff; font-size:13px; font-weight:600; }
+#alertbar.ok { background:#1b5e20; }
+#anim-view { margin:14px; }
+#anim-view .card { margin:0 0 14px; }
 </style>
 </head>
 <body>
@@ -554,10 +698,12 @@ footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
 <h1>🛰️ Kebun Sawit — Rawang Air Putih</h1>
 <p><span id="plot"></span> · diperbarui: <span id="updated"></span></p>
 </header>
+<div id="alertbar" hidden></div>
 <nav>
 <button id="btn-latest" class="active">Terbaru</button>
 <button id="btn-history">Riwayat</button>
 <button id="btn-compare">Banding</button>
+<button id="btn-anim">Animasi</button>
 </nav>
 <main>
 <section id="tab-latest"><div id="latest-cards"></div></section>
@@ -575,6 +721,9 @@ footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
 <select id="c-date-b"></select>
 </div>
 <div class="compare"><div id="c-a"></div><div id="c-b"></div></div>
+</section>
+<section id="tab-anim" hidden>
+<div id="anim-view"></div>
 </section>
 </main>
 <div class="legend">
@@ -608,7 +757,7 @@ function imgLink(snap,key){
   a.appendChild(im); return a;
 }
 function showTab(name){
-  ['latest','history','compare'].forEach(function(t){
+  ['latest','history','compare','anim'].forEach(function(t){
     q('#tab-'+t).hidden = (t !== name);
     q('#btn-'+t).classList.toggle('active', t === name);
   });
@@ -660,14 +809,39 @@ function fillControls(){
   if(DATA.snapshots.length > 1){ q('#c-date-a').selectedIndex = 1; }
   q('#c-date-b').selectedIndex = 0;
 }
+function renderAnim(){
+  var box = q("#anim-view"); box.innerHTML = "";
+  var tl = DATA.timelapse;
+  if(!tl){ box.textContent = "Timelapse akan muncul setelah ada beberapa tanggal."; return; }
+  var items = [["warna","Warna Asli"],["ndvi","NDVI (Kesehatan)"]];
+  items.forEach(function(it){
+    if(!tl[it[0]]){ return; }
+    var card = document.createElement("div"); card.className = "card";
+    var h = document.createElement("h2"); h.textContent = "Animasi " + it[1]; card.appendChild(h);
+    var im = document.createElement("img"); im.src = tl[it[0]]; card.appendChild(im);
+    box.appendChild(card);
+  });
+}
+function renderHealth(){
+  var bar = q("#alertbar"); var h = DATA.health;
+  if(!h){ bar.hidden = true; return; }
+  if(h.alert){
+    bar.hidden = false; bar.className = "";
+    bar.textContent = "\u26a0\ufe0f NDVI turun " + h.alert.drop + " (" + h.alert.from + " \u2192 " + h.alert.to + ") sejak " + h.alert.since;
+  } else if(h.current != null){
+    bar.hidden = false; bar.className = "ok";
+    bar.textContent = "\u2705 NDVI rata-rata plot: " + h.current + " (stabil)";
+  } else { bar.hidden = true; }
+}
 function init(){
   q('#updated').textContent = DATA.updated || '';
   q('#plot').textContent = DATA.plot || '';
   fillControls();
-  renderLatest(); renderHistory(); renderCompare();
+  renderLatest(); renderHistory(); renderCompare(); renderAnim(); renderHealth();
   q('#btn-latest').onclick = function(){ showTab('latest'); };
   q('#btn-history').onclick = function(){ showTab('history'); };
   q('#btn-compare').onclick = function(){ showTab('compare'); };
+  q('#btn-anim').onclick = function(){ showTab('anim'); };
   q('#h-layer').onchange = renderHistory; q('#h-date').onchange = renderHistory;
   q('#c-layer').onchange = renderCompare;
   q('#c-date-a').onchange = renderCompare; q('#c-date-b').onchange = renderCompare;
