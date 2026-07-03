@@ -63,17 +63,46 @@ function evaluatePixel(s){
 }
 """
 
+EVAL_NDMI = """//VERSION=3
+function setup() { return { input: ["B08", "B11"], output: { bands: 3 } }; }
+function evaluatePixel(s) {
+  let v = (s.B08 - s.B11) / (s.B08 + s.B11);
+  if (v < -0.2)     return [0.75, 0.20, 0.13];
+  else if (v < 0.0) return [0.95, 0.55, 0.20];
+  else if (v < 0.2) return [0.95, 0.85, 0.30];
+  else if (v < 0.4) return [0.55, 0.85, 0.55];
+  else if (v < 0.6) return [0.20, 0.65, 0.75];
+  else              return [0.10, 0.35, 0.85];
+}
+"""
+
+EVAL_NDRE = """//VERSION=3
+function setup() { return { input: ["B05", "B08"], output: { bands: 3 } }; }
+function evaluatePixel(s) {
+  let v = (s.B08 - s.B05) / (s.B08 + s.B05);
+  if (v < 0.1)      return [0.75, 0.20, 0.13];
+  else if (v < 0.2) return [0.95, 0.55, 0.20];
+  else if (v < 0.3) return [0.95, 0.85, 0.30];
+  else if (v < 0.4) return [0.60, 0.85, 0.20];
+  else if (v < 0.5) return [0.20, 0.65, 0.15];
+  else              return [0.00, 0.35, 0.05];
+}
+"""
+
 TITLES = {
     "1_warna_asli_terbaru.png": "Warna Asli — Terbaru",
     "2_ndvi_terbaru.png": "NDVI (Kesehatan) — Terbaru",
     "3_warna_asli_bebas_awan.png": "Warna Asli — Bebas Awan",
     "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) — Bebas Awan",
+    "5_ndmi_terbaru.png": "NDMI (Kelembapan) — Terbaru",
+    "6_ndre_terbaru.png": "NDRE (Nutrisi) — Terbaru",
 }
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
 LAYER_KEYS = ["1_warna_asli_terbaru.png", "2_ndvi_terbaru.png",
-              "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png"]
+              "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png",
+              "5_ndmi_terbaru.png", "6_ndre_terbaru.png"]
 
 
 def nice_date(iso):
@@ -133,10 +162,10 @@ def scene_info(token, days, mode):
         except Exception:
             pass
         print("    (catalog gagal: %s %s)" % (e, body_txt))
-        return None, None
+        return None, None, None
     if not feats:
         print("    (catalog: tidak ada scene dalam rentang)")
-        return None, None
+        return None, None, None
 
     def cc_of(f):
         v = f.get("properties", {}).get("eo:cloud_cover")
@@ -157,7 +186,28 @@ def scene_info(token, days, mode):
         y, m, day = d.split("-")
         label = "%d %s %s" % (int(day), MONTHS[int(m)], y)
     cc = p.get("eo:cloud_cover")
-    return label, (round(cc) if cc is not None else None)
+    return label, (round(cc) if cc is not None else None), d
+
+
+def rain_mm(iso_date, back_days=10):
+    """Total hujan (mm) beberapa hari sebelum tanggal citra (Open-Meteo, gratis)."""
+    if not iso_date or len(iso_date) != 10:
+        return None
+    try:
+        end = iso_date
+        start = (dt.date.fromisoformat(iso_date) - dt.timedelta(days=back_days - 1)).isoformat()
+        url = ("https://archive-api.open-meteo.com/v1/archive?latitude=%.5f&longitude=%.5f"
+               "&start_date=%s&end_date=%s&daily=precipitation_sum&timezone=Asia%%2FSingapore"
+               % (LAT, LON, start, end))
+        with urllib.request.urlopen(url, timeout=45) as r:
+            js = json.load(r)
+        vals = [v for v in (js.get("daily", {}).get("precipitation_sum") or []) if v is not None]
+        if not vals:
+            return None
+        return round(sum(vals))
+    except Exception as e:
+        print("    (cuaca gagal: %s)" % e)
+        return None
 
 
 def fetch(token, evalscript, days, mosaicking, out_path, px):
@@ -251,7 +301,7 @@ def build_viewer(paths, metas, stamp, ver, out_dir, day):
     meta_obj = {"date": day, "stamp": stamp}
     meta_obj["images"] = {}
     for name, m in metas.items():
-        meta_obj["images"][name] = {"sat": m.get("sat"), "cloud": m.get("cloud")}
+        meta_obj["images"][name] = {"sat": m.get("sat"), "cloud": m.get("cloud"), "rain": m.get("rain")}
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta_obj, f, ensure_ascii=False)
     snaps = []
@@ -272,7 +322,7 @@ def build_viewer(paths, metas, stamp, ver, out_dir, day):
             for key in LAYER_KEYS:
                 if os.path.exists(os.path.join(ddir, key)):
                     info = saved.get(key, {})
-                    imgs[key] = {"sat": info.get("sat"), "cloud": info.get("cloud")}
+                    imgs[key] = {"sat": info.get("sat"), "cloud": info.get("cloud"), "rain": info.get("rain")}
             if imgs:
                 snaps.append({"date": d, "label": nice_date(d), "dir": "citra/" + d, "images": imgs})
     data = {
@@ -344,27 +394,48 @@ def main():
         ("2_ndvi_terbaru.png",          EVAL_NDVI,      LATEST_DAYS,    "mostRecent"),
         ("3_warna_asli_bebas_awan.png", EVAL_TRUECOLOR, CLOUDFREE_DAYS, "leastCC"),
         ("4_ndvi_bebas_awan.png",       EVAL_NDVI,      CLOUDFREE_DAYS, "leastCC"),
+        ("5_ndmi_terbaru.png",          EVAL_NDMI,      LATEST_DAYS,    "mostRecent"),
+        ("6_ndre_terbaru.png",          EVAL_NDRE,      LATEST_DAYS,    "mostRecent"),
     ]
     paths = []
     metas = {}
+    rain_cache = {}
     for name, ev, days, mos in jobs:
         print("  -> " + name)
-        date_lbl, cc = scene_info(token, days, mos)
+        date_lbl, cc, iso = scene_info(token, days, mos)
         p = fetch(token, ev, days, mos, os.path.join(out_dir, name), native_px)
         if p:
             cap = "Satelit: " + (date_lbl or "?")
             if cc is not None:
                 cap += " (awan %d%%)" % cc
             proc = "Diproses: " + today_lbl
-            finalize(p, [cap, proc], factor)
-            metas[name] = {"sat": date_lbl, "cloud": cc}
+            if iso not in rain_cache:
+                rain_cache[iso] = rain_mm(iso)
+            rmm = rain_cache[iso]
+            lines = []
+            if rmm is not None:
+                lines.append("Hujan 10hr: %d mm" % rmm)
+            lines.append(cap)
+            lines.append(proc)
+            finalize(p, lines, factor)
+            metas[name] = {"sat": date_lbl, "cloud": cc, "rain": rmm}
             print("    [ok] %s (%s | %s)" % (name, cap, proc))
         paths.append(p)
     ok = len([p for p in paths if p])
     print("Tersimpan %d/4 di %s" % (ok, out_dir))
     build_viewer(paths, metas, stamp, ver, out_dir, day)
     try:
-        send_email(paths)
+        new_sig = "|".join((metas.get(k, {}).get("sat") or "") for k in LAYER_KEYS)
+        sig_path = ".last_email.txt"
+        prev_sig = ""
+        if os.path.exists(sig_path):
+            prev_sig = open(sig_path, encoding="utf-8").read().strip()
+        if new_sig and new_sig != prev_sig:
+            send_email(paths)
+            with open(sig_path, "w", encoding="utf-8") as f:
+                f.write(new_sig)
+        else:
+            print("(email dilewati: tidak ada citra baru sejak email terakhir)")
     except Exception as e:
         print("(email gagal: %s)" % e)
 
