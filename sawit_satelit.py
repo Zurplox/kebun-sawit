@@ -111,7 +111,7 @@ def scene_info(token, days, mode):
     req = urllib.request.Request(
         CATALOG_URL, data=json.dumps(body).encode(),
         headers={"Authorization": "Bearer " + token,
-                 "Content-Type": "application/json", "Accept": "application/json"})
+                 "Content-Type": "application/json", "Accept": "application/geo+json, application/json, */*"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             feats = json.load(r).get("features", [])
@@ -255,9 +255,13 @@ def build_viewer(paths, stamp, ver):
 def send_email(paths):
     to = os.environ.get("MAIL_TO", "").strip()
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
-    port = int(os.environ.get("SMTP_PORT", "587"))
+    port_raw = os.environ.get("SMTP_PORT", "587").strip()
+    port = int(port_raw) if port_raw.isdigit() else 587
     user = os.environ.get("SMTP_USER", "").strip()
     pw = os.environ.get("SMTP_PASS", "").strip()
+    if not (to and user and pw):
+        print("(email dilewati: MAIL_TO/SMTP_USER/SMTP_PASS belum diisi)")
+        return
     if not (to and user and pw):
         print("(email dilewati: secret email belum lengkap)")
         return
