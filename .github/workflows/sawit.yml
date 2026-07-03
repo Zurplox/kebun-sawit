@@ -2,15 +2,14 @@ name: Citra Sawit Harian
 
 on:
   schedule:
-    # Setiap hari 00:00 UTC = 08:00 WIB/Singapore
-    - cron: "0 0 * * *"
-  workflow_dispatch: {}   # tombol jalankan manual
+    - cron: "0 0 * * *"   # 00:00 UTC = 08:00 WIB/SGT setiap hari
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  ambil-citra:
+  citra:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -21,20 +20,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Jalankan skrip
+      - name: Install dependencies
+        run: pip install pillow
+
+      - name: Generate citra sawit
         env:
           SH_CLIENT_ID: ${{ secrets.SH_CLIENT_ID }}
           SH_CLIENT_SECRET: ${{ secrets.SH_CLIENT_SECRET }}
-          # Ganti lokasi plot di sini jika perlu:
-          PLOT_LAT: "0.81500"
-          PLOT_LON: "101.96617"
-          BOX_HALF_M: "600"
+          PLOT_LAT: "0.82429"
+          PLOT_LON: "101.96640"
+          BOX_HALF_M: "750"
         run: python sawit_satelit.py
 
-      - name: Simpan citra ke repo
+      - name: Commit and push hasil
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Citra sawit harian $(date -u +%Y-%m-%d)" || echo "Tidak ada perubahan"
+          git commit -m "Update citra sawit harian" || echo "Tidak ada perubahan"
           git push
