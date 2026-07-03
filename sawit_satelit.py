@@ -72,6 +72,17 @@ TITLES = {
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
+LAYER_KEYS = ["1_warna_asli_terbaru.png", "2_ndvi_terbaru.png",
+              "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png"]
+
+
+def nice_date(iso):
+    try:
+        y, m, dd = iso.split("-")
+        return "%d %s %s" % (int(dd), MONTHS[int(m)], y)
+    except Exception:
+        return iso
+
 
 def get_token():
     cid = os.environ.get("SH_CLIENT_ID", "").strip()
@@ -232,24 +243,52 @@ def finalize(path, lines, factor):
     im.save(path)
 
 
-def build_viewer(paths, stamp, ver):
+def build_viewer(paths, metas, stamp, ver, out_dir, day):
     os.makedirs("latest", exist_ok=True)
-    cards = ""
     for p in paths:
-        if not p:
-            continue
-        name = os.path.basename(p)
-        shutil.copyfile(p, os.path.join("latest", name))
-        title = TITLES.get(name, name)
-        cards += ('<div class="card"><h2>' + title + '</h2>'
-                  '<a href="latest/' + name + '?v=' + ver + '" target="_blank">'
-                  '<img src="latest/' + name + '?v=' + ver + '" alt="' + title + '"></a></div>\n')
-    html = HTML_TEMPLATE.replace("__DATE__", stamp).replace("__CARDS__", cards)
+        if p:
+            shutil.copyfile(p, os.path.join("latest", os.path.basename(p)))
+    meta_obj = {"date": day, "stamp": stamp}
+    meta_obj["images"] = {}
+    for name, m in metas.items():
+        meta_obj["images"][name] = {"sat": m.get("sat"), "cloud": m.get("cloud")}
+    with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta_obj, f, ensure_ascii=False)
+    snaps = []
+    base = "citra"
+    if os.path.isdir(base):
+        for d in sorted(os.listdir(base), reverse=True):
+            ddir = os.path.join(base, d)
+            if not os.path.isdir(ddir):
+                continue
+            saved = {}
+            mp = os.path.join(ddir, "meta.json")
+            if os.path.exists(mp):
+                try:
+                    saved = json.load(open(mp, encoding="utf-8")).get("images", {})
+                except Exception:
+                    saved = {}
+            imgs = {}
+            for key in LAYER_KEYS:
+                if os.path.exists(os.path.join(ddir, key)):
+                    info = saved.get(key, {})
+                    imgs[key] = {"sat": info.get("sat"), "cloud": info.get("cloud")}
+            if imgs:
+                snaps.append({"date": d, "label": nice_date(d), "dir": "citra/" + d, "images": imgs})
+    data = {
+        "updated": stamp,
+        "plot": "Rawang Air Putih (%.5f, %.5f)" % (LAT, LON),
+        "ver": ver,
+        "layers": [{"key": k, "title": TITLES[k]} for k in LAYER_KEYS],
+        "snapshots": snaps,
+    }
+    with open("data.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
     with open("index.html", "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(HTML_TEMPLATE)
     with open("manifest.json", "w", encoding="utf-8") as f:
         f.write(MANIFEST)
-    print("index.html diperbarui.")
+    print("Dashboard diperbarui (%d snapshot)." % len(snaps))
 
 
 def send_email(paths):
@@ -307,6 +346,7 @@ def main():
         ("4_ndvi_bebas_awan.png",       EVAL_NDVI,      CLOUDFREE_DAYS, "leastCC"),
     ]
     paths = []
+    metas = {}
     for name, ev, days, mos in jobs:
         print("  -> " + name)
         date_lbl, cc = scene_info(token, days, mos)
@@ -317,11 +357,12 @@ def main():
                 cap += " (awan %d%%)" % cc
             proc = "Diproses: " + today_lbl
             finalize(p, [cap, proc], factor)
+            metas[name] = {"sat": date_lbl, "cloud": cc}
             print("    [ok] %s (%s | %s)" % (name, cap, proc))
         paths.append(p)
     ok = len([p for p in paths if p])
     print("Tersimpan %d/4 di %s" % (ok, out_dir))
-    build_viewer(paths, stamp, ver)
+    build_viewer(paths, metas, stamp, ver, out_dir, day)
     try:
         send_email(paths)
     except Exception as e:
@@ -339,12 +380,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <style>
 * { box-sizing:border-box; }
 body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:#0f2417; color:#eaf5ea; }
-header { padding:16px; text-align:center; background:#1b5e20; position:sticky; top:0; z-index:5; }
-header h1 { margin:0; font-size:17px; }
-header p { margin:5px 0 0; font-size:13px; opacity:.85; }
+header { padding:14px 16px; background:#1b5e20; }
+header h1 { margin:0; font-size:16px; }
+header p { margin:4px 0 0; font-size:12px; opacity:.85; }
+nav { display:flex; background:#144024; position:sticky; top:0; z-index:5; }
+nav button { flex:1; padding:13px 6px; background:none; border:none; color:#cfe8cf; font-size:14px; border-bottom:3px solid transparent; cursor:pointer; }
+nav button.active { color:#fff; border-bottom-color:#7ed957; font-weight:600; }
 .card { margin:14px; background:#15321f; border-radius:14px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,.35); }
-.card h2 { font-size:15px; margin:0; padding:12px 14px 8px; }
-.card img { width:100%; display:block; image-rendering:pixelated; }
+.card h2 { font-size:15px; margin:0; padding:12px 14px 2px; }
+.cap { font-size:12px; opacity:.8; padding:0 14px 8px; }
+.card img, #h-view img, .compare img { width:100%; display:block; image-rendering:pixelated; }
+.controls { display:flex; gap:8px; flex-wrap:wrap; padding:14px; }
+.controls select { flex:1; min-width:120px; padding:10px; border-radius:10px; border:none; background:#0f2417; color:#eaf5ea; font-size:14px; }
+#h-view { margin:0 14px 14px; background:#15321f; border-radius:14px; overflow:hidden; }
+#h-view .cap { padding:12px 14px; }
+.compare { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 14px 14px; }
+.compare > div { background:#15321f; border-radius:12px; overflow:hidden; }
+.compare .cap { padding:8px 10px 2px; font-weight:600; opacity:1; }
+.compare .sub { font-size:11px; opacity:.75; padding:0 10px 8px; }
 .legend { margin:14px; padding:14px; background:#15321f; border-radius:14px; font-size:13px; line-height:1.8; }
 .sw { display:inline-block; width:13px; height:13px; border-radius:3px; margin-right:7px; vertical-align:middle; }
 footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
@@ -353,9 +406,31 @@ footer { text-align:center; font-size:12px; opacity:.6; padding:20px; }
 <body>
 <header>
 <h1>🛰️ Kebun Sawit — Rawang Air Putih</h1>
-<p>Diperbarui: __DATE__</p>
+<p><span id="plot"></span> · diperbarui: <span id="updated"></span></p>
 </header>
-__CARDS__
+<nav>
+<button id="btn-latest" class="active">Terbaru</button>
+<button id="btn-history">Riwayat</button>
+<button id="btn-compare">Banding</button>
+</nav>
+<main>
+<section id="tab-latest"><div id="latest-cards"></div></section>
+<section id="tab-history" hidden>
+<div class="controls">
+<select id="h-layer"></select>
+<select id="h-date"></select>
+</div>
+<div id="h-view"></div>
+</section>
+<section id="tab-compare" hidden>
+<div class="controls">
+<select id="c-layer"></select>
+<select id="c-date-a"></select>
+<select id="c-date-b"></select>
+</div>
+<div class="compare"><div id="c-a"></div><div id="c-b"></div></div>
+</section>
+</main>
 <div class="legend">
 <b>Cara baca NDVI:</b><br>
 <span class="sw" style="background:#00591a"></span> Hijau tua — rimbun / sehat<br>
@@ -365,6 +440,94 @@ __CARDS__
 <span class="sw" style="background:#bfbfbf"></span> Abu — air / tanah basah
 </div>
 <footer>Otomatis dari Sentinel-2 · Copernicus · tap gambar untuk perbesar</footer>
+<script>
+var DATA=null;
+function q(s){ return document.querySelector(s); }
+function ver(){ return (DATA && DATA.ver) ? DATA.ver : ''; }
+function src(snap,key){ return snap.dir + '/' + key + '?v=' + ver(); }
+function capOf(snap,key){
+  var i = snap.images[key] || {};
+  var t = 'Satelit: ' + (i.sat || '?');
+  if(i.cloud != null){ t += ' (awan ' + i.cloud + '%)'; }
+  return t;
+}
+function mkOpt(sel,val,txt){
+  var o = document.createElement('option');
+  o.value = val; o.textContent = txt; sel.appendChild(o);
+}
+function imgLink(snap,key){
+  var a = document.createElement('a');
+  a.href = src(snap,key); a.target = '_blank';
+  var im = document.createElement('img'); im.src = src(snap,key); im.alt = key;
+  a.appendChild(im); return a;
+}
+function showTab(name){
+  ['latest','history','compare'].forEach(function(t){
+    q('#tab-'+t).hidden = (t !== name);
+    q('#btn-'+t).classList.toggle('active', t === name);
+  });
+}
+function findSnap(date){
+  for(var i=0;i<DATA.snapshots.length;i++){ if(DATA.snapshots[i].date === date){ return DATA.snapshots[i]; } }
+  return null;
+}
+function renderLatest(){
+  var wrap = q('#latest-cards'); wrap.innerHTML = '';
+  if(!DATA.snapshots.length){ wrap.textContent = 'Belum ada citra.'; return; }
+  var snap = DATA.snapshots[0];
+  DATA.layers.forEach(function(L){
+    if(!snap.images[L.key]){ return; }
+    var card = document.createElement('div'); card.className = 'card';
+    var h = document.createElement('h2'); h.textContent = L.title; card.appendChild(h);
+    var c = document.createElement('div'); c.className = 'cap'; c.textContent = capOf(snap,L.key); card.appendChild(c);
+    card.appendChild(imgLink(snap,L.key));
+    wrap.appendChild(card);
+  });
+}
+function renderHistory(){
+  var layer = q('#h-layer').value, date = q('#h-date').value;
+  var snap = findSnap(date); var box = q('#h-view'); box.innerHTML = '';
+  if(!snap){ return; }
+  if(!snap.images[layer]){ box.textContent = 'Tidak ada gambar ini pada tanggal tsb.'; return; }
+  var c = document.createElement('div'); c.className = 'cap';
+  c.textContent = snap.label + ' — ' + capOf(snap,layer); box.appendChild(c);
+  box.appendChild(imgLink(snap,layer));
+}
+function renderCompare(){
+  var layer = q('#c-layer').value;
+  ['a','b'].forEach(function(side){
+    var date = q('#c-date-'+side).value; var snap = findSnap(date);
+    var box = q('#c-'+side); box.innerHTML = '';
+    if(!snap || !snap.images[layer]){ box.textContent = '—'; return; }
+    var c = document.createElement('div'); c.className = 'cap'; c.textContent = snap.label; box.appendChild(c);
+    box.appendChild(imgLink(snap,layer));
+    var s2 = document.createElement('div'); s2.className = 'sub'; s2.textContent = capOf(snap,layer); box.appendChild(s2);
+  });
+}
+function fillControls(){
+  [q('#h-layer'), q('#c-layer')].forEach(function(sel){
+    DATA.layers.forEach(function(L){ mkOpt(sel, L.key, L.title); });
+  });
+  [q('#h-date'), q('#c-date-a'), q('#c-date-b')].forEach(function(sel){
+    DATA.snapshots.forEach(function(s){ mkOpt(sel, s.date, s.label); });
+  });
+  if(DATA.snapshots.length > 1){ q('#c-date-a').selectedIndex = 1; }
+  q('#c-date-b').selectedIndex = 0;
+}
+function init(){
+  q('#updated').textContent = DATA.updated || '';
+  q('#plot').textContent = DATA.plot || '';
+  fillControls();
+  renderLatest(); renderHistory(); renderCompare();
+  q('#btn-latest').onclick = function(){ showTab('latest'); };
+  q('#btn-history').onclick = function(){ showTab('history'); };
+  q('#btn-compare').onclick = function(){ showTab('compare'); };
+  q('#h-layer').onchange = renderHistory; q('#h-date').onchange = renderHistory;
+  q('#c-layer').onchange = renderCompare;
+  q('#c-date-a').onchange = renderCompare; q('#c-date-b').onchange = renderCompare;
+}
+fetch('data.json?t=' + Date.now()).then(function(r){ return r.json(); }).then(function(d){ DATA = d; init(); }).catch(function(e){ document.body.insertAdjacentHTML('beforeend', '<p style="padding:16px">Gagal memuat data.json: ' + e + '</p>'); });
+</script>
 </body>
 </html>
 """
