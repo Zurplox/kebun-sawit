@@ -185,22 +185,31 @@ def load_font(size):
         return ImageFont.load_default()
 
 
-def finalize(path, label, factor):
-    """Perbesar tajam (nearest = tanpa blur palsu) + cap tanggal di pojok."""
+def finalize(path, lines, factor):
+    """Perbesar tajam (nearest) + cap beberapa baris tanggal di pojok kiri-bawah."""
     im = Image.open(path).convert("RGB")
     w, h = im.size
     im = im.resize((w * factor, h * factor), Image.NEAREST)
     W, H = im.size
     d = ImageDraw.Draw(im)
-    fs = max(16, W // 30)
+    fs = max(15, W // 34)
     font = load_font(fs)
     pad = fs // 2
-    try:
-        tw = int(d.textlength(label, font=font))
-    except Exception:
-        tw = fs * len(label) // 2
-    d.rectangle([0, H - fs - 2 * pad, tw + 2 * pad, H], fill=(0, 0, 0))
-    d.text((pad, H - fs - int(pad * 1.2)), label, fill=(255, 255, 255), font=font)
+    gap = max(3, int(fs * 0.3))
+    widths = []
+    for ln in lines:
+        try:
+            widths.append(int(d.textlength(ln, font=font)))
+        except Exception:
+            widths.append(fs * len(ln) // 2)
+    n = len(lines)
+    box_w = max(widths) + 2 * pad
+    box_h = n * fs + (n - 1) * gap + 2 * pad
+    d.rectangle([0, H - box_h, box_w, H], fill=(0, 0, 0))
+    y = H - box_h + pad
+    for ln in lines:
+        d.text((pad, y), ln, fill=(255, 255, 255), font=font)
+        y += fs + gap
     im.save(path)
 
 
@@ -256,6 +265,7 @@ def send_email(paths):
 def main():
     now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=8)
     stamp = now.strftime("%d %b %Y, %H:%M WIB")
+    today_lbl = "%d %s %d" % (now.day, MONTHS[now.month], now.year)
     ver = now.strftime("%Y%m%d%H%M")
     day = dt.date.today().isoformat()
     out_dir = os.path.join("citra", day)
@@ -279,11 +289,12 @@ def main():
         date_lbl, cc = scene_info(token, days, mos)
         p = fetch(token, ev, days, mos, os.path.join(out_dir, name), native_px)
         if p:
-            tag = "S2 · " + (date_lbl or day)
+            cap = "Satelit: " + (date_lbl or "?")
             if cc is not None:
-                tag += " · awan %d%%" % cc
-            finalize(p, tag, factor)
-            print("    [ok] %s (%s)" % (name, tag))
+                cap += " (awan %d%%)" % cc
+            proc = "Diproses: " + today_lbl
+            finalize(p, [cap, proc], factor)
+            print("    [ok] %s (%s | %s)" % (name, cap, proc))
         paths.append(p)
     ok = len([p for p in paths if p])
     print("Tersimpan %d/4 di %s" % (ok, out_dir))
