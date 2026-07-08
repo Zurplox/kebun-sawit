@@ -40,6 +40,7 @@ BOX_HALF_M = float(os.environ.get("BOX_HALF_M", "600"))
 RES_M = 10.0  # resolusi asli Sentinel-2 (band tampak) = 10 meter/piksel
 LATEST_DAYS = 20
 CLOUDFREE_DAYS = 60
+CLOUDFREE_MAX_CC = 20  # ambang maks tutupan awan (%) untuk "bebas awan": pilih tanggal TERBARU yang awannya <= nilai ini
 NDVI_ALERT_DROP = 0.08  # penurunan rata-rata NDVI yang dianggap signifikan
 TIMELAPSE_MAX_FRAMES = 120  # animasi pakai maksimal N frame terbaru (folder lama tetap disimpan)
 
@@ -208,6 +209,11 @@ def scene_info(token, days, mode):
 
     if mode == "mostRecent":
         f = max(feats, key=dt_of)
+    elif mode == "latestClear":
+        # Tanggal TERBARU yang cukup jernih (awan <= CLOUDFREE_MAX_CC).
+        # Jika tak ada yang lolos ambang, jatuh ke perilaku lama: paling sedikit awan.
+        clear = [x for x in feats if cc_of(x) <= CLOUDFREE_MAX_CC]
+        f = max(clear, key=dt_of) if clear else min(feats, key=cc_of)
     else:
         f = min(feats, key=cc_of)
 
@@ -629,7 +635,7 @@ def main():
 
     # 3) SNAPSHOT TERBARU (main day = scene paling baru) + layer bebas-awan & NDMI/NDRE
     mr_folder = os.path.join("citra", mr_iso)
-    cf_label, cf_cc, cf_iso = scene_info(token, CLOUDFREE_DAYS, "leastCC")
+    cf_label, cf_cc, cf_iso = scene_info(token, CLOUDFREE_DAYS, "latestClear")
     paths = []
     metas_latest = {}
     for name in ("1_warna_asli_terbaru.png", "2_ndvi_terbaru.png"):
