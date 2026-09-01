@@ -24,6 +24,8 @@ jobs:
           PLOT_LAT: "0.81573"
           PLOT_LON: "101.96621"
           BOX_HALF_M: "750"
+          WIDE_HALF_M: "50000"
+          WIDE_PX: "2000"
         run: python sawit_satelit.py
       - name: Commit and push hasil
         run: |

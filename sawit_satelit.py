@@ -43,6 +43,9 @@ CLOUDFREE_DAYS = 60
 CLOUDFREE_MAX_CC = 20  # ambang maks tutupan awan (%) untuk "bebas awan": pilih tanggal TERBARU yang awannya <= nilai ini
 NDVI_ALERT_DROP = 0.08  # penurunan rata-rata NDVI yang dianggap signifikan
 TIMELAPSE_MAX_FRAMES = 120  # animasi pakai maksimal N frame terbaru (folder lama tetap disimpan)
+WIDE_HALF_M = float(os.environ.get("WIDE_HALF_M", "50000"))  # 50 km tiap sisi -> tampilan 100 km
+WIDE_PX = int(os.environ.get("WIDE_PX", "2000"))  # sisi citra area luas (batas API: maks 2500)
+WIDE_KM = int(round(2 * WIDE_HALF_M / 1000.0))
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
@@ -112,13 +115,16 @@ TITLES = {
     "4_ndvi_bebas_awan.png": "NDVI (Kesehatan) \u2014 Bebas Awan",
     "5_ndmi_terbaru.png": "NDMI (Kelembapan) \u2014 Bebas Awan",
     "6_ndre_terbaru.png": "NDRE (Nutrisi) \u2014 Bebas Awan",
+    "7_warna_asli_luas.png": "Warna Asli \u2014 Area Luas %d km" % WIDE_KM,
+    "8_ndvi_luas.png": "NDVI (Kesehatan) \u2014 Area Luas %d km" % WIDE_KM,
 }
 MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
           "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
 
 LAYER_KEYS = ["1_warna_asli_terbaru.png", "2_ndvi_terbaru.png",
               "3_warna_asli_bebas_awan.png", "4_ndvi_bebas_awan.png",
-              "5_ndmi_terbaru.png", "6_ndre_terbaru.png"]
+              "5_ndmi_terbaru.png", "6_ndre_terbaru.png",
+              "7_warna_asli_luas.png", "8_ndvi_luas.png"]
 
 
 def nice_date(iso):
@@ -248,7 +254,7 @@ def rain_mm(iso_date, back_days=10):
         return None
 
 
-def fetch(token, evalscript, days, mosaicking, out_path, px, pin_iso=None):
+def fetch(token, evalscript, days, mosaicking, out_path, px, pin_iso=None, half_m=None):
     to_d = dt.date.today()
     from_d = to_d - dt.timedelta(days=days)
     if pin_iso and len(pin_iso) == 10:
@@ -260,7 +266,7 @@ def fetch(token, evalscript, days, mosaicking, out_path, px, pin_iso=None):
     body = {
         "input": {
             "bounds": {
-                "bbox": bbox_from_center(LAT, LON, BOX_HALF_M),
+                "bbox": bbox_from_center(LAT, LON, half_m if half_m else BOX_HALF_M),
                 "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
             },
             "data": [{
@@ -680,6 +686,32 @@ def main():
             finalize(p, lines, factor)
             metas_latest[name] = {"sat": cf_label, "cloud": cf_cc, "rain": rmm}
             paths.append(p)
+    # 3b) Citra AREA LUAS (default 100 km) untuk tanggal TERBARU: warna asli + NDVI.
+    # Disimpan di folder tanggal seperti biasa -> otomatis tampil di grid Terbaru,
+    # Riwayat, dan Banding untuk tanggal2 baru. Tidak di-backfill utk hemat kuota.
+    wide_px = max(256, min(2500, WIDE_PX))
+    for name, ev in (("7_warna_asli_luas.png", EVAL_TRUECOLOR),
+                     ("8_ndvi_luas.png", EVAL_NDVI)):
+        out_path = os.path.join(mr_folder, name)
+        metas_latest.setdefault(name, {"sat": nice_date(mr_iso), "cloud": mr_cc,
+                                       "rain": rain_for(mr_iso)})
+        if os.path.exists(out_path):
+            continue
+        p = fetch(token, ev, LATEST_DAYS, "mostRecent", out_path, wide_px,
+                  mr_iso, half_m=WIDE_HALF_M)
+        if not p:
+            metas_latest.pop(name, None)
+            continue
+        rmm = rain_for(mr_iso)
+        cap = "Satelit: " + nice_date(mr_iso)
+        if mr_cc is not None:
+            cap += " (awan %d%%)" % mr_cc
+        lines = []
+        if rmm is not None:
+            lines.append("Hujan 10hr: %d mm" % rmm)
+        lines.append(cap)
+        lines.append("Diproses: " + today_lbl)
+        finalize(p, lines, 1)  # tanpa perbesaran: resolusi asli sudah besar
     save_meta(mr_folder, mr_iso, metas_latest)
 
     # 4) Kesehatan (NDVI rata-rata scene terbaru) + timelapse + dashboard
